@@ -35,6 +35,7 @@
 ;;; Code:
 
 (require 'elec-pair)
+(require 'newcomment)
 (require 'treesit)
 
 (defgroup query-ts nil
@@ -91,6 +92,26 @@
 
 ;;;;; Propertization
 
+(defvar-local query-ts-mode-syntax--changed-start nil
+  "Earliest pending syntax change reported by the parser.")
+
+(defun query-ts-mode-syntax--changed (ranges _parser)
+  "Invalidate syntax properties for the parser's changed RANGES."
+  (dolist (range ranges)
+    (setq query-ts-mode-syntax--changed-start
+          (min (or query-ts-mode-syntax--changed-start (car range))
+               (car range))))
+  (when query-ts-mode-syntax--changed-start
+    (syntax-ppss-flush-cache query-ts-mode-syntax--changed-start)))
+
+(defun query-ts-mode-syntax--extend-region (start end)
+  "Extend START and END to include pending structural changes."
+  (treesit-parser-root-node treesit-primary-parser)
+  (let ((begin query-ts-mode-syntax--changed-start))
+    (setq query-ts-mode-syntax--changed-start nil)
+    (when (and begin (< begin start))
+      (cons (max (point-min) begin) end))))
+
 (defun query-ts-mode-syntax--propertize (start end)
   "Apply syntax properties between START and END."
   (let ((accessible-start (point-min)))
@@ -141,14 +162,32 @@
 
 (defun query-ts-mode-syntax--setup ()
   "Configure syntax handling for the current buffer."
+  (treesit-parser-add-notifier treesit-primary-parser #'query-ts-mode-syntax--changed)
   (setq-local syntax-propertize-function
               #'query-ts-mode-syntax--propertize)
   (add-hook 'syntax-propertize-extend-region-functions
             #'syntax-propertize-wholelines nil t)
+  (add-hook 'syntax-propertize-extend-region-functions
+            #'query-ts-mode-syntax--extend-region t t))
+
+;;;; Comment Commands
+
+(defun query-ts-mode-comment--uncomment-region (beg end &optional arg)
+  "Uncomment BEG through END using syntax classified before editing.
+Pass ARG to `uncomment-region-default'."
+  (syntax-propertize end)
+  (unwind-protect
+      (let ((syntax-propertize-function nil))
+        (uncomment-region-default beg end arg))
+    (syntax-ppss-flush-cache beg)))
+
+(defun query-ts-mode-comment--setup ()
+  "Configure comment commands for the current buffer."
   (setq-local comment-start "; ")
   (setq-local comment-end "")
   (setq-local comment-start-skip ";+[ \t\v\f]*")
-  (setq-local comment-use-syntax t))
+  (setq-local comment-use-syntax t)
+  (setq-local uncomment-region-function #'query-ts-mode-comment--uncomment-region))
 
 ;;;; Electric Pair
 
@@ -174,7 +213,7 @@
 
 (defun query-ts-mode-electric-pair--setup ()
   "Configure electric pairing for the current buffer."
-  (let ((pairs '((?\( . ?\)) (?\[ . ?\])))
+  (let ((pairs '((?\( . ?\)) (?\[ . ?\]) (?\" . ?\")))
         (table (copy-syntax-table (syntax-table))))
     (setq-local electric-pair-pairs (append electric-pair-pairs pairs))
     (dolist (pair pairs)
@@ -342,6 +381,7 @@
   (query-ts-mode--ensure-grammar 'query)
   (setq-local treesit-primary-parser (treesit-parser-create 'query))
   (query-ts-mode-syntax--setup)
+  (query-ts-mode-comment--setup)
   (query-ts-mode-electric-pair--setup)
   (query-ts-mode-font-lock--setup)
   (query-ts-mode-navigation--setup)
