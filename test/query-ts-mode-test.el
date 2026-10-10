@@ -583,6 +583,70 @@
 
 ;;;; Updates
 
+(ert-deftest query-ts-mode-reparses-a-bom-moved-to-buffer-start ()
+  (pcase-dolist (`(,language ,file ,properties ,prefix ,body ,fragment ,face)
+                 '((query "test.scm" "" "(node)\n" "; note\n" "note" font-lock-comment-face)))
+    (dolist (narrow '(nil t))
+      (ert-info ((format "%s, narrowed: %s" language narrow))
+        (let ((default-directory
+               (file-name-as-directory (make-temp-file "query-ts-mode-" t))))
+          (unwind-protect
+              (progn
+                (with-temp-file (expand-file-name ".editorconfig")
+                  (insert "root = true\n[*]\n" properties))
+                (with-temp-buffer
+                  (setq buffer-file-name (expand-file-name file))
+                  (insert prefix "\ufeff" body)
+                  (let ((treesit-font-lock-level 4)) (query-ts-mode))
+                  (query-ts-mode-test--buffer-state)
+                  (when narrow
+                    (narrow-to-region 1 (+ 2 (length prefix))))
+                  (delete-region 1 (1+ (length prefix)))
+                  (widen)
+                  (should (eq (treesit-parser-language treesit-primary-parser) language))
+                  (should (equal (treesit-parser-list) (list treesit-primary-parser)))
+                  (let ((state (query-ts-mode-test--buffer-state))
+                        (tree (treesit-node-string
+                               (treesit-parser-root-node treesit-primary-parser)))
+                        (source (buffer-substring-no-properties (point-min) (point-max)))
+                        (filename buffer-file-name))
+                    (should (equal source (concat "\ufeff" body)))
+                    (should-not (get-text-property 1 'face))
+                    (goto-char (point-min))
+                    (search-forward fragment)
+                    (should (eq (get-text-property (1- (point)) 'face) face))
+                    (with-temp-buffer
+                      (setq buffer-file-name filename)
+                      (insert source)
+                      (let ((treesit-font-lock-level 4)) (query-ts-mode))
+                      (should (equal state (query-ts-mode-test--buffer-state)))
+                      (should (equal tree (treesit-node-string
+                                           (treesit-parser-root-node treesit-primary-parser))))))))
+            (delete-directory default-directory t)))))))
+
+(ert-deftest query-ts-mode-restores-strings-after-escaping-line-breaks ()
+  (pcase-dolist (`(,prefix ,suffix)
+                 '(("" "") ("(#eq? @x " ")") ("(node/" ")")))
+    (ert-info ((format "%S / %S" prefix suffix))
+      (with-temp-buffer
+        (insert prefix "\"a\n;\0b\"" suffix)
+        (let ((treesit-font-lock-level 4)) (query-ts-mode))
+        (query-ts-mode-test--buffer-state)
+        (should (treesit-node-check (treesit-buffer-root-node) 'has-error))
+        (goto-char (+ (length prefix) 3))
+        (insert "\\")
+        (font-lock-ensure)
+        (syntax-propertize (point-max))
+        (should-not (treesit-node-check (treesit-buffer-root-node) 'has-error))
+        (should (= (syntax-class (syntax-after (1+ (length prefix)))) 15))
+        (should (eq (query-ts-mode-test--face "\\") 'font-lock-escape-face))
+        (should (eq (query-ts-mode-test--face ";") 'font-lock-string-face))
+        (should (eq (query-ts-mode-test--face "\0") 'font-lock-string-face))
+        (query-ts-mode-test--should-match-fresh-buffer 4)
+        (goto-char (+ (length prefix) 3))
+        (delete-char 1)
+        (should (treesit-node-check (treesit-buffer-root-node) 'has-error))))))
+
 (ert-deftest query-ts-mode-refreshes-syntax-before-multiline-errors ()
   (dolist (narrow '(nil t))
     (with-temp-buffer
