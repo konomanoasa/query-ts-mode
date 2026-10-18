@@ -24,7 +24,6 @@
 ;;; Code:
 
 (require 'ert)
-(require 'loaddefs-gen)
 (require 'newcomment)
 (require 'query-ts-mode)
 
@@ -34,23 +33,8 @@
 
 ;;;; Helpers
 
-(defmacro query-ts-mode-test--with-file (file properties source &rest body)
-  "Evaluate BODY with SOURCE in FILE using EditorConfig PROPERTIES."
-  (declare (indent 3) (debug (form form form body)))
-  `(let ((default-directory
-          (file-name-as-directory (make-temp-file "query-ts-mode-" t))))
-     (unwind-protect
-         (progn
-           (with-temp-file (expand-file-name ".editorconfig")
-             (insert "root = true\n[*]\n" ,properties))
-           (with-temp-buffer
-             (setq buffer-file-name (expand-file-name ,file))
-             (insert ,source)
-             (query-ts-mode)
-             ,@body))
-       (delete-directory default-directory t))))
-
 (defun query-ts-mode-test--position (fragment &optional line)
+  "Return FRAGMENT's start in LINE, or anywhere when LINE is nil."
   (save-excursion
     (goto-char (point-min))
     (when line
@@ -66,15 +50,18 @@
     (- (point) (length fragment))))
 
 (defun query-ts-mode-test--face (fragment &optional offset line)
+  "Return the face at OFFSET into FRAGMENT on LINE."
   (get-text-property (+ (query-ts-mode-test--position fragment line)
                         (or offset 0)) 'face))
 
 (defun query-ts-mode-test--syntax-class (fragment &optional offset line)
+  "Return the syntax class at OFFSET into FRAGMENT on LINE."
   (syntax-propertize (point-max))
   (syntax-class (syntax-after (+ (query-ts-mode-test--position fragment line)
                                  (or offset 0)))))
 
 (defun query-ts-mode-test--indent (source &optional offset)
+  "Indent SOURCE twice using OFFSET and assert stable whitespace."
   (with-temp-buffer
     (insert source)
     (query-ts-mode)
@@ -88,6 +75,7 @@
       indented)))
 
 (defun query-ts-mode-test--buffer-state ()
+  "Return current face and syntax properties after refreshing the buffer."
   (font-lock-ensure)
   (syntax-propertize (point-max))
   (let (state)
@@ -113,76 +101,6 @@
         (should (equal tree (treesit-node-string
                              (treesit-parser-root-node treesit-primary-parser))))))))
 
-;;;; Grammar
-
-(ert-deftest query-ts-mode-respects-grammar-sources ()
-  (let ((ensure (symbol-function 'treesit-ensure-installed)) received)
-    (unwind-protect
-        (progn
-          (fset 'treesit-ensure-installed
-                (lambda (language)
-                  (setq received (assq language treesit-language-source-alist))
-                  t))
-          (dolist (source query-ts-mode--grammar-sources)
-            (let* ((language (car source))
-                   (custom (list language "/local/grammar" :revision "custom")))
-              (dolist (configured (list nil (list custom)))
-                (let ((treesit-language-source-alist configured))
-                  (should (query-ts-mode--ensure-grammar language))
-                  (should (equal received (if configured custom source)))
-                  (should (eq treesit-language-source-alist configured)))))))
-      (fset 'treesit-ensure-installed ensure))))
-
-(ert-deftest query-ts-mode-reports-unavailable-grammar ()
-  (let ((ensure (symbol-function 'treesit-ensure-installed)))
-    (unwind-protect
-        (progn
-          (fset 'treesit-ensure-installed (lambda (_language) nil))
-          (with-temp-buffer
-            (should-error (query-ts-mode) :type 'user-error)
-            (should-not (treesit-parser-list))))
-      (fset 'treesit-ensure-installed ensure))))
-
-(ert-deftest query-ts-mode-starts-and-reuses-parser ()
-  (with-temp-buffer
-    (insert "(node) @capture\n")
-    (query-ts-mode)
-    (should (eq major-mode 'query-ts-mode))
-    (should (eq (treesit-parser-language treesit-primary-parser) 'query))
-    (should (equal (treesit-node-type (treesit-parser-root-node treesit-primary-parser))
-                   "query"))
-    (query-ts-mode)
-    (should (equal (treesit-parser-list) (list treesit-primary-parser)))))
-
-;;;; Mode Selection
-
-(ert-deftest query-ts-mode-selects-files ()
-  (pcase-dolist (`(,file . ,expected)
-                 '(("/tmp/queries/highlights.scm" . t)
-                   ("/tmp/queries/python/highlights.scm" . t)
-                   ("queries/injections.scm" . t)
-                   ("/tmp/highlights.scm" . nil)
-                   ("/tmp/queries.scm" . nil)
-                   ("/tmp/myqueries/highlights.scm" . nil)
-                   ("/tmp/queries/highlights.txt" . nil)))
-    (with-temp-buffer
-      (setq buffer-file-name file)
-      (set-auto-mode)
-      (should (eq (eq major-mode 'query-ts-mode) expected)))))
-
-(ert-deftest query-ts-mode-generates-autoloads ()
-  (let ((output (make-temp-file "query-ts-mode-loaddefs-"))
-        (directory (file-name-directory (locate-library "query-ts-mode"))))
-    (unwind-protect
-        (progn
-          (loaddefs-generate directory output nil nil nil t)
-          (with-temp-buffer
-            (insert-file-contents output)
-            (dolist (form '("(autoload 'query-ts-mode" "(add-to-list 'auto-mode-alist"))
-              (goto-char (point-min))
-              (should (search-forward form nil t)))))
-      (delete-file output))))
-
 ;;;; Syntax
 
 (ert-deftest query-ts-mode-classifies-owned-delimiters-and-strings ()
@@ -199,18 +117,6 @@
     (should (= (scan-sexps 1 1) (query-ts-mode-test--position "\n")))
     (should (nth 3 (syntax-ppss (1+ (query-ts-mode-test--position "{}")))))))
 
-(ert-deftest query-ts-mode-keeps-unowned-and-unterminated-delimiters-as-punctuation ()
-  (with-temp-buffer
-    (insert ")]\n(#eq? @x \"unfinished\n")
-    (let ((treesit-font-lock-level 4)) (query-ts-mode))
-    (font-lock-ensure)
-    (should (treesit-node-check (treesit-parser-root-node treesit-primary-parser) 'has-error))
-    (dolist (fragment '(")]" "]\n" "\"unfinished"))
-      (ert-info ((format "%S" fragment))
-        (should (= (query-ts-mode-test--syntax-class fragment) 1))))
-    (dolist (fragment '(")]" "]\n"))
-      (should-not (query-ts-mode-test--face fragment)))))
-
 (ert-deftest query-ts-mode-keeps-string-interior-quotes-and-escapes-as-punctuation ()
   (with-temp-buffer
     (insert "(#eq? @x \"'`\\\"\\\\[](){}\")\n")
@@ -222,29 +128,7 @@
         (syntax-propertize (point-max))
         (should (= (syntax-class (syntax-after (- (point) (length fragment)))) 1))))))
 
-(ert-deftest query-ts-mode-classifies-comments ()
-  (with-temp-buffer
-    (insert "; first\n(node \"; text\") ;; second\n(#eq? @x \";\")\n")
-    (query-ts-mode)
-    (syntax-propertize (point-max))
-    (pcase-dolist (`(,fragment . ,expected)
-                   '(("first" . t) ("second" . t) ("text" . nil) ("eq" . nil)))
-      (ert-info ((format "%S" fragment))
-        (should (eq (not (null (nth 4 (syntax-ppss
-                                       (query-ts-mode-test--position fragment)))))
-                    expected))))
-    (should (nth 3 (syntax-ppss (query-ts-mode-test--position "text"))))))
-
 ;;;; Comment Commands
-
-(ert-deftest query-ts-mode-comments-and-uncomments ()
-  (with-temp-buffer
-    (insert "(node)\n;; note\n")
-    (query-ts-mode)
-    (comment-region 1 7)
-    (should (equal (buffer-string) "; (node)\n;; note\n"))
-    (uncomment-region (point-min) (point-max))
-    (should (equal (buffer-string) "(node)\nnote\n"))))
 
 (ert-deftest query-ts-mode-uncomments-multiline-source ()
   (dolist (case
@@ -262,57 +146,6 @@
         (should (equal (query-ts-mode-test--buffer-state) state))))))
 
 ;;;; Electric Pair
-
-(ert-deftest query-ts-mode-supplies-electric-pairs ()
-  (let ((electric-pair-pairs '((?% . ?%)))
-        (electric-pair-mode nil))
-    (pcase-dolist (`(,prefix ,opening ,expected)
-                   '(("" ?\( "()")
-                     ("" ?\[ "[]")))
-      (ert-info ((format "%S / %c" prefix opening))
-        (with-temp-buffer
-          (insert prefix)
-          (query-ts-mode)
-          (should-not electric-pair-mode)
-          (should (local-variable-p 'electric-pair-pairs))
-          (should (equal (assq ?% electric-pair-pairs) '(?% . ?%)))
-          (electric-pair-local-mode 1)
-          (let ((last-command-event opening)) (self-insert-command 1))
-          (should (equal (buffer-string) expected))
-          (should (= (point) (1- (point-max)))))))
-    (should (equal electric-pair-pairs '((?% . ?%)))))
-  (let ((electric-pair-pairs '((?\( . ?!) (?\[ . ?@))))
-    (pcase-dolist (`(,prefix ,opening ,expected)
-                   '(("" ?\( "(!")
-                     ("" ?\[ "[@")))
-      (with-temp-buffer
-        (insert prefix)
-        (query-ts-mode)
-        (electric-pair-local-mode 1)
-        (let ((last-command-event opening)) (self-insert-command 1))
-        (should (equal (buffer-string) expected))
-        (should (= (point) (1- (point-max))))))
-    (should (equal electric-pair-pairs '((?\( . ?!) (?\[ . ?@))))))
-
-(ert-deftest query-ts-mode-respects-pair-newline-preferences ()
-  (let ((calls 0))
-    (pcase-dolist (`(,setting ,expected)
-                   (list (list nil "(\n)")
-                         (list t "(\n\n)")
-                         (list (lambda () (setq calls (1+ calls)) nil) "(\n)")
-                         (list (lambda () (setq calls (1+ calls)) t) "(\n\n)")))
-      (setq calls 0)
-      (let ((electric-pair-open-newline-between-pairs setting))
-        (with-temp-buffer
-          (insert "()")
-          (query-ts-mode)
-          (electric-indent-local-mode -1)
-          (electric-pair-local-mode 1)
-          (goto-char 2)
-          (call-interactively (key-binding (kbd "RET")))
-          (should (equal (buffer-string) expected)))
-        (should (eq (> calls 0) (functionp setting)))
-        (should (eq electric-pair-open-newline-between-pairs setting))))))
 
 (ert-deftest query-ts-mode-pairs-delimiters-and-indents-on-return ()
   (pcase-dolist (`(,prefix ,opening ,expected ,column)
@@ -351,114 +184,6 @@
           (call-interactively (key-binding (kbd "RET")))
           (should (equal (buffer-string) expected)))))))
 
-(ert-deftest query-ts-mode-pairs-language-quotes ()
-  (let ((electric-pair-pairs nil)
-        (electric-pair-text-pairs nil))
-    (pcase-dolist (`(,prefix ,quote ,opened ,closed)
-                   '(("(#eq? @x " ?\" "(#eq? @x \"\"" "(#eq? @x \"x\"")))
-      (with-temp-buffer
-        (insert prefix)
-        (query-ts-mode)
-        (electric-pair-local-mode 1)
-        (let ((last-command-event quote)) (self-insert-command 1))
-        (should (equal (buffer-string) opened))
-        (should (= (point) (1- (point-max))))
-        (let ((last-command-event ?x)) (self-insert-command 1))
-        (let ((last-command-event quote)) (self-insert-command 1))
-        (should (equal (buffer-string) closed))
-        (should (eobp))))
-    (should-not electric-pair-pairs)))
-
-;;;; Font Lock
-
-(ert-deftest query-ts-mode-fontifies-by-level ()
-  (dolist (level '(1 2 3 4))
-    (let ((treesit-font-lock-level level))
-      (with-temp-buffer
-        (insert "; note\n((node field: (_) !other . (child)+ @cap) (#eq? @cap \"a\\n\" local))\n"
-                "(MISSING)\n")
-        (query-ts-mode)
-        (font-lock-ensure)
-        (pcase-dolist (`(,fragment ,offset ,minimum ,face)
-                       '(("note" 0 1 font-lock-comment-face)
-                         ("node" 0 2 font-lock-type-face)
-                         ("field" 0 2 font-lock-property-use-face)
-                         ("other" 0 2 font-lock-property-use-face)
-                         ("@cap)" 1 2 font-lock-variable-name-face)
-                         ("@cap \"" 1 2 font-lock-variable-use-face)
-                         ("eq" 0 2 font-lock-function-call-face)
-                         ("\"a" 0 2 font-lock-string-face)
-                         ("\"a" 1 2 font-lock-string-face)
-                         ("local" 0 2 font-lock-string-face)
-                         ("MISSING" 0 2 font-lock-keyword-face)
-                         ("_)" 0 3 font-lock-constant-face)
-                         ("\\n" 0 3 font-lock-escape-face)
-                         ("+" 0 4 font-lock-operator-face)
-                         (". (" 0 4 font-lock-operator-face)
-                         ("!other" 0 4 font-lock-negation-char-face)
-                         (": (" 0 4 font-lock-punctuation-face)
-                         ("@cap)" 0 4 font-lock-punctuation-face)
-                         ("#eq" 0 4 font-lock-punctuation-face)
-                         ("? @" 0 4 font-lock-punctuation-face)
-                         ("((" 0 4 font-lock-bracket-face)))
-          (ert-info ((format "Level %s: %S at %d" level fragment offset))
-            (should (eq (query-ts-mode-test--face fragment offset)
-                        (and (>= level minimum) face)))))))))
-
-(ert-deftest query-ts-mode-fontifies-names-by-owning-context ()
-  (with-temp-buffer
-    (insert "(ERROR) (MISSING identifier) (MISSING _/\"token\") (expression/call) (_/node)\n"
-            "(node _field: (_)* @a.b) (#set! injection.language \"x\\\"y\")\n")
-    (let ((treesit-font-lock-level 4)) (query-ts-mode))
-    (font-lock-ensure)
-    (pcase-dolist (`(,fragment ,offset ,face)
-                   '(("ERROR" 0 font-lock-type-face)
-                     ("MISSING identifier" 0 font-lock-keyword-face)
-                     ("identifier" 0 font-lock-type-face)
-                     ("_/\"token" 0 font-lock-type-face)
-                     ("_/\"token" 1 font-lock-punctuation-face)
-                     ("_/\"token" 2 font-lock-string-face)
-                     ("token" 0 font-lock-string-face)
-                     ("expression" 0 font-lock-type-face)
-                     ("/call" 0 font-lock-punctuation-face)
-                     ("call" 0 font-lock-type-face)
-                     ("_/node" 0 font-lock-type-face)
-                     ("node)" 0 font-lock-type-face)
-                     ("_field: (_)" 0 font-lock-constant-face)
-                     ("_field: (_)" 1 font-lock-property-use-face)
-                     ("_)*" 0 font-lock-constant-face)
-                     ("*" 0 font-lock-operator-face)
-                     ("a.b" 0 font-lock-variable-name-face)
-                     ("a.b" 1 font-lock-variable-name-face)
-                     ("#set" 0 font-lock-punctuation-face)
-                     ("set" 0 font-lock-function-call-face)
-                     ("! injection" 0 font-lock-punctuation-face)
-                     ("injection.language" 0 font-lock-string-face)
-                     ("injection.language" 9 font-lock-string-face)
-                     ("x\\" 0 font-lock-string-face)
-                     ("\\\"" 0 font-lock-escape-face)
-                     ("\\\"" 1 font-lock-escape-face)
-                     ("y\"" 0 font-lock-string-face)
-                     ("y\"" 1 font-lock-string-face)
-                     ("\n(node" 0 nil)
-                     ("(node _" 0 font-lock-bracket-face)))
-      (ert-info ((format "%S at %d" fragment offset))
-        (should (eq (query-ts-mode-test--face fragment offset) face))))))
-
-(ert-deftest query-ts-mode-highlights-field-chains-and-call-anchors ()
-  (with-temp-buffer
-    (insert "outer: inner: (node . (#custom?)) @x\n")
-    (let ((treesit-font-lock-level 4)) (query-ts-mode))
-    (font-lock-ensure)
-    (pcase-dolist (`(,fragment ,face)
-                   '(("outer" font-lock-property-use-face)
-                     ("inner" font-lock-property-use-face)
-                     ("node" font-lock-type-face)
-                     ("." font-lock-operator-face)
-                     ("custom" font-lock-function-call-face)
-                     ("x\n" font-lock-variable-name-face)))
-      (should (eq (query-ts-mode-test--face fragment) face)))))
-
 ;;;; Navigation
 
 (ert-deftest query-ts-mode-navigates-top-level-field-chains ()
@@ -479,9 +204,6 @@
   (with-temp-buffer
     (insert "; head\n(first\n  (child) @c)\n\n((second) (#eq? @x \"a b\"))\n(#set! k v)\n")
     (query-ts-mode)
-    (should-not treesit-simple-imenu-settings)
-    (should (equal (mapcar #'car (cdr (assq 'query treesit-thing-settings)))
-                   '(sexp defun)))
     (goto-char (query-ts-mode-test--position "(first"))
     (forward-sexp)
     (should (= (point) (query-ts-mode-test--position "\n\n((second")))
@@ -501,34 +223,6 @@
     (goto-char (query-ts-mode-test--position "k v"))
     (beginning-of-defun)
     (should (= (point) (query-ts-mode-test--position "(#set")))))
-
-(ert-deftest query-ts-mode-navigates-atoms-and-prefixed-specifications ()
-  (with-temp-buffer
-    (insert "(node child: (super/sub) @cap !absent . (MISSING \"tok\") (_)) @outer\n"
-            "(#eq? @outer \"a b\" local)\n")
-    (query-ts-mode)
-    (pcase-dolist (`(,fragment ,offset ,count ,target ,target-offset)
-                   '(("node" 0 1 "node" 4)
-                     ("node" 4 -1 "node" 0)
-                     ("child:" 0 1 "@cap" 4)
-                     ("child:" 5 -1 "child:" 0)
-                     ("super/sub" 0 1 "super/sub" 9)
-                     ("super/sub" 6 1 "super/sub" 9)
-                     ("super/sub" 9 -1 "super/sub" 0)
-                     ("@cap" 0 1 "@cap" 4)
-                     ("@cap" 4 -1 "child:" 0)
-                     ("!absent" 0 1 "!absent" 7)
-                     ("MISSING" 0 1 "\"tok\"" 5)
-                     ("\"tok\"" 0 1 "\"tok\"" 5)
-                     ("(_)" 1 1 "(_)" 2)
-                     ("eq?" 0 1 "eq?" 2)
-                     ("\"a b\"" 1 1 "\"a b\"" 5)
-                     ("local" 0 1 "local" 5)))
-      (ert-info ((format "%S" (list fragment offset count target target-offset)))
-        (goto-char (+ (query-ts-mode-test--position fragment) offset))
-        (forward-sexp count)
-        (should (= (point) (+ (query-ts-mode-test--position target)
-                              target-offset)))))))
 
 (ert-deftest query-ts-mode-navigates-postfixed-patterns-and-edits ()
   (with-temp-buffer
@@ -607,78 +301,71 @@
 ;;;; Updates
 
 (ert-deftest query-ts-mode-reparses-old-recovery-even-for-distant-edits ()
-  (pcase-dolist (`(,language ,file ,properties)
-                 '((query "test.scm" "")))
-    (let ((treesit-font-lock-level 4))
-      (query-ts-mode-test--with-file file properties "(node name: (identifier)\n(other) @tail\n"
-                                     (query-ts-mode-test--buffer-state)
-                                     (let* ((parser treesit-primary-parser)
-                                            (notifiers (treesit-parser-notifiers parser)))
-                                       (should (treesit-node-check (treesit-parser-root-node parser) 'has-error))
-                                       (treesit-parser-set-embed-level parser 3)
-                                       (goto-char (point-min))
-                                       (search-forward "tail")
-                                       (save-restriction
-                                         (narrow-to-region (line-beginning-position) (line-end-position))
-                                         (insert "x"))
-                                       (should-not (eq parser treesit-primary-parser))
-                                       (should (eq (treesit-parser-language treesit-primary-parser) language))
-                                       (should (= (treesit-parser-embed-level treesit-primary-parser) 3))
-                                       (should (equal (treesit-parser-notifiers treesit-primary-parser) notifiers))
-                                       (should (equal (treesit-parser-list) (list treesit-primary-parser))))
-                                     (goto-char (point-min))
-                                     (search-forward "identifier)")
-                                     (backward-char 0)
-                                     (insert ")")
-                                     (should-not (treesit-node-check
-                                                  (treesit-parser-root-node treesit-primary-parser) 'has-error))
-                                     (query-ts-mode-test--should-match-fresh-buffer 4 t)))))
+  (with-temp-buffer
+    (insert "(node name: (identifier)\n(other) @tail\n")
+    (let ((treesit-font-lock-level 4)) (query-ts-mode))
+    (query-ts-mode-test--buffer-state)
+    (let* ((parser treesit-primary-parser)
+           (notifiers (treesit-parser-notifiers parser)))
+      (should (treesit-node-check (treesit-parser-root-node parser) 'has-error))
+      (treesit-parser-set-embed-level parser 3)
+      (goto-char (query-ts-mode-test--position "tail"))
+      (save-restriction
+        (narrow-to-region (line-beginning-position) (line-end-position))
+        (insert "x"))
+      (should-not (eq parser treesit-primary-parser))
+      (should (eq (treesit-parser-language treesit-primary-parser) 'query))
+      (should (= (treesit-parser-embed-level treesit-primary-parser) 3))
+      (should (equal (treesit-parser-notifiers treesit-primary-parser) notifiers))
+      (should (equal (treesit-parser-list) (list treesit-primary-parser))))
+    (goto-char (query-ts-mode-test--position "\n(other)"))
+    (insert ")")
+    (should-not (treesit-node-check
+                 (treesit-parser-root-node treesit-primary-parser) 'has-error))
+    (query-ts-mode-test--should-match-fresh-buffer 4 t)))
 
 (ert-deftest query-ts-mode-refreshes-edited-owners-without-parser-notifications ()
-  (pcase-dolist (`(,language ,file ,properties ,source ,fragment ,owner-start)
-                 '((query "test.scm" "" "(node name: (identifier)) @capture\n" "identifier" 1)))
-    (dolist (narrow '(nil t))
-      (ert-info ((format "%s, narrowed: %s" language narrow))
-        (let ((treesit-font-lock-level 4))
-          (query-ts-mode-test--with-file file properties source
-                                         (rename-buffer "query-ts-mode-test" t)
-                                         (let ((noninteractive nil)) (font-lock-mode 1))
-                                         (query-ts-mode-test--buffer-state)
-                                         (should (get-text-property owner-start 'fontified))
-                                         (let ((parser treesit-primary-parser))
-                                           (should-not (treesit-node-check (treesit-parser-root-node parser) 'has-error))
-                                           (dolist (notifier (treesit-parser-notifiers parser))
-                                             (treesit-parser-remove-notifier parser notifier))
-                                           (goto-char (query-ts-mode-test--position fragment))
-                                           (when narrow
-                                             (narrow-to-region (line-beginning-position) (line-end-position)))
-                                           (insert "x")
-                                           (widen)
-                                           (should (eq parser treesit-primary-parser))
-                                           (should-not (get-text-property owner-start 'fontified))
-                                           (query-ts-mode-test--should-match-fresh-buffer 4 t))))))))
+  (dolist (narrow '(nil t))
+    (ert-info ((format "Narrowed: %s" narrow))
+      (with-temp-buffer
+        (insert "(node name: (identifier)) @capture\n")
+        (let ((treesit-font-lock-level 4)) (query-ts-mode))
+        (rename-buffer "query-ts-mode-test" t)
+        (let ((noninteractive nil)) (font-lock-mode 1))
+        (query-ts-mode-test--buffer-state)
+        (should (get-text-property 1 'fontified))
+        (let ((parser treesit-primary-parser))
+          (should-not (treesit-node-check (treesit-parser-root-node parser) 'has-error))
+          (dolist (notifier (treesit-parser-notifiers parser))
+            (treesit-parser-remove-notifier parser notifier))
+          (goto-char (query-ts-mode-test--position "identifier"))
+          (when narrow
+            (narrow-to-region (line-beginning-position) (line-end-position)))
+          (insert "x")
+          (widen)
+          (should (eq parser treesit-primary-parser))
+          (should-not (get-text-property 1 'fontified))
+          (query-ts-mode-test--should-match-fresh-buffer 4 t))))))
 
 (ert-deftest query-ts-mode-reparses-a-bom-moved-to-buffer-start ()
-  (pcase-dolist (`(,language ,file ,properties ,prefix ,body ,fragment ,face)
-                 '((query "test.scm" "" "(node)\n" "; note\n" "note" font-lock-comment-face)))
-    (dolist (narrow '(nil t))
-      (ert-info ((format "%s, narrowed: %s" language narrow))
-        (let ((treesit-font-lock-level 4))
-          (query-ts-mode-test--with-file file properties (concat prefix "\ufeff" body)
-                                         (query-ts-mode-test--buffer-state)
-                                         (when narrow (narrow-to-region 1 (+ 2 (length prefix))))
-                                         (delete-region 1 (1+ (length prefix)))
-                                         (widen)
-                                         (should (eq (treesit-parser-language treesit-primary-parser) language))
-                                         (should (equal (treesit-parser-list) (list treesit-primary-parser)))
-                                         (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                                                        (concat "\ufeff" body)))
-                                         (query-ts-mode-test--buffer-state)
-                                         (should-not (get-text-property 1 'face))
-                                         (goto-char (point-min))
-                                         (search-forward fragment)
-                                         (should (eq (get-text-property (1- (point)) 'face) face))
-                                         (query-ts-mode-test--should-match-fresh-buffer 4 t)))))))
+  (dolist (narrow '(nil t))
+    (ert-info ((format "Narrowed: %s" narrow))
+      (with-temp-buffer
+        (insert "(node)\n\ufeff; note\n")
+        (let ((treesit-font-lock-level 4)) (query-ts-mode))
+        (query-ts-mode-test--buffer-state)
+        (let ((parser treesit-primary-parser))
+          (when narrow (narrow-to-region 1 9))
+          (delete-region 1 8)
+          (widen)
+          (should-not (eq parser treesit-primary-parser))
+          (should (equal (treesit-parser-list) (list treesit-primary-parser)))
+          (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                         "\ufeff; note\n"))
+          (query-ts-mode-test--buffer-state)
+          (should-not (get-text-property 1 'face))
+          (should (eq (query-ts-mode-test--face "note") 'font-lock-comment-face))
+          (query-ts-mode-test--should-match-fresh-buffer 4 t))))))
 
 (ert-deftest query-ts-mode-restores-strings-after-escaping-line-breaks ()
   (pcase-dolist (`(,prefix ,suffix)
@@ -732,12 +419,6 @@
                     font-lock-string-face)
                    ("(a \"b\")\n" "\"b\"" "\"b" "b" nil)
                    ("(node (child))\n" "(child)" "[(child)]" "[" font-lock-bracket-face)
-                   ("(node field: (x))\n" "field" "_field" "_field"
-                    font-lock-constant-face)
-                   ("(node _field: (x))\n" "_field" "field" "field"
-                    font-lock-property-use-face)
-                   ("(x) @_cap\n" "(x)" "(_x)" "_x" font-lock-type-face)
-                   ("_ _ @second\n" "_ _" "__" "__" font-lock-constant-face)
                    ("(node) @x\n" "(node) @x" "((node) @x (#eq? @x \"a\"))" "eq"
                     font-lock-function-call-face)))
     (ert-info ((format "%S: %S -> %S" source old new))

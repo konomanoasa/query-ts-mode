@@ -46,7 +46,7 @@
 
 (defconst query-ts-mode--grammar-sources
   '((query "https://github.com/konomanoasa/tree-sitter-query"
-           :revision "v0.3.1"))
+           :revision "v0.3.2"))
   "Tree-sitter grammar sources for Tree-sitter queries.")
 
 (defun query-ts-mode--ensure-grammar (language)
